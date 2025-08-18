@@ -1,0 +1,307 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: magic-flow-secret
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+type: Opaque
+data:
+  # Base64 encoded values - these should be replaced with actual secrets
+  database-password: bWFnaWNfZmxvd19wYXNzd29yZA== # magic_flow_password
+  redis-password: cmVkaXNfcGFzc3dvcmQ= # redis_password
+  jwt-secret: c3VwZXJfc2VjcmV0X2p3dF9rZXlfZm9yX21hZ2ljX2Zsb3c= # super_secret_jwt_key_for_magic_flow
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: magic-flow-data-pvc
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: standard
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: magic-flow-logs-pvc
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: magic-flow
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+    component: application
+    version: v2
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: magic-flow
+  template:
+    metadata:
+      labels:
+        app: magic-flow
+        component: application
+        version: v2
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: magic-flow-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      containers:
+      - name: magic-flow
+        image: magic-flow:v2
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: api
+          protocol: TCP
+        - containerPort: 8081
+          name: dashboard
+          protocol: TCP
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+        env:
+        - name: CONFIG_PATH
+          value: "/app/configs/config.yaml"
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: magic-flow-secret
+              key: database-password
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: magic-flow-secret
+              key: redis-password
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: magic-flow-secret
+              key: jwt-secret
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        volumeMounts:
+        - name: config
+          mountPath: /app/configs
+          readOnly: true
+        - name: data
+          mountPath: /app/data
+        - name: logs
+          mountPath: /app/logs
+        - name: templates
+          mountPath: /app/templates
+          readOnly: true
+        - name: tls-certs
+          mountPath: /etc/ssl/certs
+          readOnly: true
+        - name: tls-private
+          mountPath: /etc/ssl/private
+          readOnly: true
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 30
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config
+        configMap:
+          name: magic-flow-config
+      - name: data
+        persistentVolumeClaim:
+          claimName: magic-flow-data-pvc
+      - name: logs
+        persistentVolumeClaim:
+          claimName: magic-flow-logs-pvc
+      - name: templates
+        configMap:
+          name: magic-flow-templates
+          optional: true
+      - name: tls-certs
+        secret:
+          secretName: magic-flow-tls
+          optional: true
+      - name: tls-private
+        secret:
+          secretName: magic-flow-tls
+          optional: true
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - magic-flow
+              topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: magic-flow-api-service
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+    component: api
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: api
+  - port: 9090
+    targetPort: 9090
+    protocol: TCP
+    name: metrics
+  selector:
+    app: magic-flow
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: magic-flow-dashboard-service
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+    component: dashboard
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8081
+    targetPort: 8081
+    protocol: TCP
+    name: dashboard
+  selector:
+    app: magic-flow
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: magic-flow-sa
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: magic-flow-role
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: magic-flow-rolebinding
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+subjects:
+- kind: ServiceAccount
+  name: magic-flow-sa
+  namespace: magic-flow
+roleRef:
+  kind: Role
+  name: magic-flow-role
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,220 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: magic-flow-ingress
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+  annotations:
+    # Nginx ingress controller annotations
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    
+    # Rate limiting
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    
+    # CORS
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://magic-flow.example.com"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
+    
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+      more_set_headers "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:";
+    
+    # WebSocket support for dashboard
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    
+    # Certificate management (cert-manager)
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    
+    # Load balancing
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$remote_addr"
+spec:
+  tls:
+  - hosts:
+    - magic-flow.example.com
+    - api.magic-flow.example.com
+    - dashboard.magic-flow.example.com
+    secretName: magic-flow-tls
+  rules:
+  # Main API endpoint
+  - host: magic-flow.example.com
+    http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: magic-flow-api-service
+            port:
+              number: 8080
+      - path: /health
+        pathType: Exact
+        backend:
+          service:
+            name: magic-flow-api-service
+            port:
+              number: 8080
+      - path: /ready
+        pathType: Exact
+        backend:
+          service:
+            name: magic-flow-api-service
+            port:
+              number: 8080
+      - path: /metrics
+        pathType: Exact
+        backend:
+          service:
+            name: magic-flow-api-service
+            port:
+              number: 9090
+  
+  # API subdomain
+  - host: api.magic-flow.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: magic-flow-api-service
+            port:
+              number: 8080
+  
+  # Dashboard subdomain
+  - host: dashboard.magic-flow.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: magic-flow-dashboard-service
+            port:
+              number: 8081
+---
+# Separate ingress for internal monitoring (optional)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: magic-flow-monitoring-ingress
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+    component: monitoring
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: magic-flow-monitoring-auth
+    nginx.ingress.kubernetes.io/auth-realm: "Magic Flow Monitoring"
+spec:
+  tls:
+  - hosts:
+    - monitoring.magic-flow.example.com
+    secretName: magic-flow-monitoring-tls
+  rules:
+  - host: monitoring.magic-flow.example.com
+    http:
+      paths:
+      - path: /metrics
+        pathType: Exact
+        backend:
+          service:
+            name: magic-flow-api-service
+            port:
+              number: 9090
+---
+# Basic auth secret for monitoring (base64 encoded)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: magic-flow-monitoring-auth
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+    component: monitoring
+type: Opaque
+data:
+  # admin:$2y$10$... (bcrypt hash of password)
+  # Generate with: htpasswd -nb admin password | base64
+  auth: YWRtaW46JGFwcjEkSDY1dnBkJC5UQjRHNzVOSjNpUUlmVy5ORi5xLzAK
+---
+# Network policy for additional security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: magic-flow-network-policy
+  namespace: magic-flow
+  labels:
+    app: magic-flow
+spec:
+  podSelector:
+    matchLabels:
+      app: magic-flow
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow ingress from nginx ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8081
+    - protocol: TCP
+      port: 9090
+  # Allow ingress from prometheus (if in different namespace)
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 9090
+  # Allow ingress within namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: magic-flow
+  egress:
+  # Allow egress to postgres
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow egress to redis
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  # Allow egress to DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow egress to external APIs (HTTPS)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443

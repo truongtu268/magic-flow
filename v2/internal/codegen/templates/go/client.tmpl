@@ -1,0 +1,252 @@
+package {{.PackageName}}
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// {{.ClassName}} provides methods to interact with the {{.Workflow.Name}} workflow
+// Generated at: {{.GeneratedAt.Format "2006-01-02 15:04:05"}}
+type {{.ClassName}} struct {
+	baseURL    string
+	apiKey     string
+	httpClient *http.Client
+	timeout    time.Duration
+	retryCount int
+	debug      bool
+}
+
+// Config holds configuration for the {{.ClassName}}
+type Config struct {
+	BaseURL    string
+	APIKey     string
+	Timeout    time.Duration
+	RetryCount int
+	Debug      bool
+}
+
+// DefaultConfig returns a default configuration
+func DefaultConfig() *Config {
+	return &Config{
+		BaseURL:    "http://localhost:8080",
+		Timeout:    30 * time.Second,
+		RetryCount: 3,
+		Debug:      false,
+	}
+}
+
+// New{{.ClassName}} creates a new {{.ClassName}} instance
+func New{{.ClassName}}(config *Config) *{{.ClassName}} {
+	if config == nil {
+		config = DefaultConfig()
+	}
+
+	return &{{.ClassName}}{
+		baseURL: config.BaseURL,
+		apiKey:  config.APIKey,
+		httpClient: &http.Client{
+			Timeout: config.Timeout,
+		},
+		timeout:    config.Timeout,
+		retryCount: config.RetryCount,
+		debug:      config.Debug,
+	}
+}
+
+// ExecuteWorkflow executes the {{.Workflow.Name}} workflow
+func (c *{{.ClassName}}) ExecuteWorkflow(ctx context.Context, input map[string]interface{}) (*ExecutionResult, error) {
+	url := fmt.Sprintf("%s/api/v2/workflows/{{.Workflow.ID}}/execute", c.baseURL)
+	
+	reqBody := map[string]interface{}{
+		"input": input,
+	}
+	
+	resp, err := c.makeRequest(ctx, "POST", url, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute workflow: %w", err)
+	}
+	
+	var result ExecutionResult
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	
+	return &result, nil
+}
+
+// GetExecutionStatus retrieves the status of a workflow execution
+func (c *{{.ClassName}}) GetExecutionStatus(ctx context.Context, executionID uuid.UUID) (*ExecutionStatus, error) {
+	url := fmt.Sprintf("%s/api/v2/executions/%s", c.baseURL, executionID)
+	
+	resp, err := c.makeRequest(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get execution status: %w", err)
+	}
+	
+	var status ExecutionStatus
+	if err := json.Unmarshal(resp, &status); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	
+	return &status, nil
+}
+
+// CancelExecution cancels a running workflow execution
+func (c *{{.ClassName}}) CancelExecution(ctx context.Context, executionID uuid.UUID) error {
+	url := fmt.Sprintf("%s/api/v2/executions/%s/cancel", c.baseURL, executionID)
+	
+	_, err := c.makeRequest(ctx, "POST", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to cancel execution: %w", err)
+	}
+	
+	return nil
+}
+
+// GetExecutionResult retrieves the result of a completed workflow execution
+func (c *{{.ClassName}}) GetExecutionResult(ctx context.Context, executionID uuid.UUID) (*ExecutionResult, error) {
+	url := fmt.Sprintf("%s/api/v2/executions/%s/result", c.baseURL, executionID)
+	
+	resp, err := c.makeRequest(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get execution result: %w", err)
+	}
+	
+	var result ExecutionResult
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	
+	return &result, nil
+}
+
+// WaitForCompletion waits for a workflow execution to complete
+func (c *{{.ClassName}}) WaitForCompletion(ctx context.Context, executionID uuid.UUID, pollInterval time.Duration) (*ExecutionResult, error) {
+	if pollInterval == 0 {
+		pollInterval = 5 * time.Second
+	}
+	
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			status, err := c.GetExecutionStatus(ctx, executionID)
+			if err != nil {
+				return nil, err
+			}
+			
+			switch status.Status {
+			case ExecutionStatusCompleted:
+				return c.GetExecutionResult(ctx, executionID)
+			case ExecutionStatusFailed, ExecutionStatusCancelled:
+				return nil, fmt.Errorf("execution %s: %s", status.Status, status.Error)
+			}
+		}
+	}
+}
+
+{{range .Methods}}
+// {{.Name}} executes the {{.Name}} step
+func (c *{{$.ClassName}}) {{.Name}}(ctx context.Context, input map[string]interface{}) (*ExecutionResult, error) {
+	// Add step-specific input validation here
+	return c.ExecuteWorkflow(ctx, input)
+}
+{{end}}
+
+// makeRequest makes an HTTP request to the API
+func (c *{{.ClassName}}) makeRequest(ctx context.Context, method, url string, body interface{}) ([]byte, error) {
+	var reqBody io.Reader
+	if body != nil {
+		jsonBody, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+		reqBody = bytes.NewReader(jsonBody)
+	}
+	
+	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	
+	// Make request with retries
+	var resp *http.Response
+	var lastErr error
+	
+	for i := 0; i <= c.retryCount; i++ {
+		resp, lastErr = c.httpClient.Do(req)
+		if lastErr == nil && resp.StatusCode < 500 {
+			break
+		}
+		
+		if resp != nil {
+			resp.Body.Close()
+		}
+		
+		if i < c.retryCount {
+			time.Sleep(time.Duration(i+1) * time.Second)
+		}
+	}
+	
+	if lastErr != nil {
+		return nil, fmt.Errorf("request failed after %d retries: %w", c.retryCount, lastErr)
+	}
+	
+	defer resp.Body.Close()
+	
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+	}
+	
+	return respBody, nil
+}
+
+// SetDebug enables or disables debug logging
+func (c *{{.ClassName}}) SetDebug(debug bool) {
+	c.debug = debug
+}
+
+// SetTimeout sets the request timeout
+func (c *{{.ClassName}}) SetTimeout(timeout time.Duration) {
+	c.timeout = timeout
+	c.httpClient.Timeout = timeout
+}
+
+// SetRetryCount sets the number of retries for failed requests
+func (c *{{.ClassName}}) SetRetryCount(count int) {
+	c.retryCount = count
+}
+
+// GetBaseURL returns the base URL
+func (c *{{.ClassName}}) GetBaseURL() string {
+	return c.baseURL
+}
+
+// SetBaseURL sets the base URL
+func (c *{{.ClassName}}) SetBaseURL(baseURL string) {
+	c.baseURL = baseURL
+}

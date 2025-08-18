@@ -1,0 +1,233 @@
+package {{.PackageName}}
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// ExecutionStatus represents the status of a workflow execution
+type ExecutionStatus string
+
+const (
+	ExecutionStatusPending   ExecutionStatus = "pending"
+	ExecutionStatusRunning   ExecutionStatus = "running"
+	ExecutionStatusCompleted ExecutionStatus = "completed"
+	ExecutionStatusFailed    ExecutionStatus = "failed"
+	ExecutionStatusCancelled ExecutionStatus = "cancelled"
+)
+
+// StepStatus represents the status of a workflow step
+type StepStatus string
+
+const (
+	StepStatusPending   StepStatus = "pending"
+	StepStatusRunning   StepStatus = "running"
+	StepStatusCompleted StepStatus = "completed"
+	StepStatusFailed    StepStatus = "failed"
+	StepStatusSkipped   StepStatus = "skipped"
+)
+
+// ExecutionResult represents the result of a workflow execution
+type ExecutionResult struct {
+	ID          uuid.UUID              `json:"id"`
+	WorkflowID  uuid.UUID              `json:"workflow_id"`
+	Status      ExecutionStatus        `json:"status"`
+	Input       map[string]interface{} `json:"input,omitempty"`
+	Output      map[string]interface{} `json:"output,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+	StartedAt   time.Time              `json:"started_at"`
+	CompletedAt *time.Time             `json:"completed_at,omitempty"`
+	Duration    *time.Duration         `json:"duration,omitempty"`
+}
+
+// ExecutionStatusResponse represents the status response of a workflow execution
+type ExecutionStatusResponse struct {
+	ID          uuid.UUID    `json:"id"`
+	Status      ExecutionStatus `json:"status"`
+	Progress    int          `json:"progress"`
+	CurrentStep string       `json:"current_step,omitempty"`
+	Steps       []StepStatusResponse `json:"steps,omitempty"`
+	StartedAt   time.Time    `json:"started_at"`
+	UpdatedAt   time.Time    `json:"updated_at"`
+	Error       string       `json:"error,omitempty"`
+}
+
+// StepStatusResponse represents the status of a workflow step
+type StepStatusResponse struct {
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	Status      StepStatus             `json:"status"`
+	Input       map[string]interface{} `json:"input,omitempty"`
+	Output      map[string]interface{} `json:"output,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+	StartedAt   *time.Time             `json:"started_at,omitempty"`
+	CompletedAt *time.Time             `json:"completed_at,omitempty"`
+	Duration    *time.Duration         `json:"duration,omitempty"`
+}
+
+// WorkflowInput represents the input to a workflow
+type WorkflowInput struct {
+	Data map[string]interface{} `json:"data"`
+}
+
+// WorkflowOutput represents the output from a workflow
+type WorkflowOutput struct {
+	Data map[string]interface{} `json:"data"`
+}
+
+{{range .Models}}
+// {{.Name}} {{.Description}}
+type {{.Name}} struct {
+{{range .Fields}}	{{.Name}} {{.Type}} `json:"{{.JSONTag}}"{{if .Required}} validate:"required"{{end}}`{{if .Description}} // {{.Description}}{{end}}
+{{end}}}
+
+// New{{.Name}} creates a new {{.Name}} instance
+func New{{.Name}}() *{{.Name}} {
+	return &{{.Name}}{}
+}
+
+// Validate validates the {{.Name}} fields
+func (m *{{.Name}}) Validate() error {
+	// Add validation logic here
+	return nil
+}
+
+{{end}}
+
+// APIError represents an API error response
+type APIError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Details string `json:"details,omitempty"`
+}
+
+// Error implements the error interface
+func (e *APIError) Error() string {
+	if e.Details != "" {
+		return fmt.Sprintf("API error %d: %s (%s)", e.Code, e.Message, e.Details)
+	}
+	return fmt.Sprintf("API error %d: %s", e.Code, e.Message)
+}
+
+// ValidationError represents a validation error
+type ValidationError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+// Error implements the error interface
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("validation error for field '%s': %s", e.Field, e.Message)
+}
+
+// ExecutionError represents an execution error
+type ExecutionError struct {
+	ExecutionID uuid.UUID `json:"execution_id"`
+	StepID      string    `json:"step_id,omitempty"`
+	Message     string    `json:"message"`
+	Cause       error     `json:"-"`
+}
+
+// Error implements the error interface
+func (e *ExecutionError) Error() string {
+	if e.StepID != "" {
+		return fmt.Sprintf("execution error in step '%s' (execution %s): %s", e.StepID, e.ExecutionID, e.Message)
+	}
+	return fmt.Sprintf("execution error (execution %s): %s", e.ExecutionID, e.Message)
+}
+
+// Unwrap returns the underlying cause
+func (e *ExecutionError) Unwrap() error {
+	return e.Cause
+}
+
+// TimeoutError represents a timeout error
+type TimeoutError struct {
+	Operation string        `json:"operation"`
+	Timeout   time.Duration `json:"timeout"`
+}
+
+// Error implements the error interface
+func (e *TimeoutError) Error() string {
+	return fmt.Sprintf("timeout error: %s timed out after %v", e.Operation, e.Timeout)
+}
+
+// NetworkError represents a network error
+type NetworkError struct {
+	URL     string `json:"url"`
+	Message string `json:"message"`
+	Cause   error  `json:"-"`
+}
+
+// Error implements the error interface
+func (e *NetworkError) Error() string {
+	return fmt.Sprintf("network error for %s: %s", e.URL, e.Message)
+}
+
+// Unwrap returns the underlying cause
+func (e *NetworkError) Unwrap() error {
+	return e.Cause
+}
+
+// AuthenticationError represents an authentication error
+type AuthenticationError struct {
+	Message string `json:"message"`
+}
+
+// Error implements the error interface
+func (e *AuthenticationError) Error() string {
+	return fmt.Sprintf("authentication error: %s", e.Message)
+}
+
+// IsTemporary returns true if the error is temporary and the request can be retried
+func IsTemporary(err error) bool {
+	switch err.(type) {
+	case *NetworkError, *TimeoutError:
+		return true
+	case *APIError:
+		apiErr := err.(*APIError)
+		return apiErr.Code >= 500 && apiErr.Code < 600
+	default:
+		return false
+	}
+}
+
+// IsRetryable returns true if the error indicates the request should be retried
+func IsRetryable(err error) bool {
+	return IsTemporary(err)
+}
+
+// IsAuthenticationError returns true if the error is an authentication error
+func IsAuthenticationError(err error) bool {
+	_, ok := err.(*AuthenticationError)
+	if ok {
+		return true
+	}
+	
+	if apiErr, ok := err.(*APIError); ok {
+		return apiErr.Code == 401 || apiErr.Code == 403
+	}
+	
+	return false
+}
+
+// IsValidationError returns true if the error is a validation error
+func IsValidationError(err error) bool {
+	_, ok := err.(*ValidationError)
+	if ok {
+		return true
+	}
+	
+	if apiErr, ok := err.(*APIError); ok {
+		return apiErr.Code == 400
+	}
+	
+	return false
+}
+
+// IsExecutionError returns true if the error is an execution error
+func IsExecutionError(err error) bool {
+	_, ok := err.(*ExecutionError)
+	return ok
+}
